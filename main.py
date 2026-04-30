@@ -1,88 +1,106 @@
-from fastapi import FastAPI, Depends, Form, HTTPException
+from fastapi import FastAPI, Depends, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy.orm import Session
-import models
-# from database import SessionLocal, engine
-from database_postgres import SessionLocal, engine, Base
-from models import Base, Book, Author, Loan
-from datetime import date
-
-# Create all tables on startup
-Base.metadata.create_all(bind=engine)
+from datetime import datetime, date
+from database_mongo import authors, books, loans
 
 app = FastAPI(
-    title="Library Management System",
-    description="Лабораторна робота №1. FastAPI + SQLAlchemy ORM",
+    title="Library Management System - MongoDB",
+    description="Лабораторна робота №3. FastAPI + MongoDB + pymongo",
     version="1.0"
 )
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-@app.on_event("startup")
-def create_sample_data():
-    db = SessionLocal()
-    if db.query(Author).count() == 0:
-        # Sample authors
-        author1 = Author(name="Іван", surname="Франко", birth_year=1856)
-        author2 = Author(name="Леся", surname="Українка", birth_year=1871)
-        db.add_all([author1, author2])
-        db.commit()
-        
-        # Sample books
-        book1 = Book(title="Захар Беркут", year=1883, author_id=author1.id)
-        book2 = Book(title="Лісова пісня", year=1911, author_id=author2.id)
-        db.add_all([book1, book2])
-        db.commit()
-    db.close()
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(role: str = "user"):
     html = f"""
-    <h1>Бібліотека</h1>
+    <h1>Бібліотека (MongoDB)</h1>
     <p><b>Поточний режим:</b> {role.upper()}</p>
     <p>
-        <a href="/?role=admin">Увійти як Адміністратор</a> | 
-        <a href="/?role=user">Увійти як Користувач</a>
+        <a href="/?role=admin">Адміністратор</a> | 
+        <a href="/?role=user">Користувач</a>
     </p>
     <hr>
     <p><a href="/books?role={role}">Переглянути всі книги</a></p>
-    <p><a href="/docs">Документація OpenAPI</a></p>
+    <p><a href="/search?role={role}">Пошук книг</a></p>
+    <p><a href="/stats">Статистика</a></p>
     """
     return HTMLResponse(content=html)
 
+# ====================== SEARCH (NEW FEATURE) ======================
+@app.get("/search", response_class=HTMLResponse)
+async def search_books(q: str = Query("", alias="q"), role: str = "user"):
+    html = f"<h1>Пошук книг (Режим: {role.upper()})</h1>"
+    html += """
+    <form method="get">
+        <p><input type="text" name="q" placeholder="Введіть назву книги або автора..." style="width:400px" value="{q}"></p>
+        <button type="submit">Шукати</button>
+    </form><br>
+    """.format(q=q)
+
+    if q:
+        # MongoDB regex search (case-insensitive) on title
+        query = {"title": {"$regex": q, "$options": "i"}}
+        found_books = list(books.find(query).sort("title", 1))
+
+        html += f"<p>Знайдено результатів: <b>{len(found_books)}</b></p>"
+        if found_books:
+            html += "<table border='1' style='border-collapse: collapse; width: 100%;'>"
+            html += "<tr><th>ID</th><th>Назва</th><th>Рік</th><th>Автор ID</th><th>Статус</th><th>Дії</th></tr>"
+            
+            for book in found_books:
+                status = "Доступна" if book.get("available", True) else "Видана"
+                actions = ""
+                if role == "admin":
+                    actions += f"<a href='/books/{book['_id']}/edit?role=admin'>Редагувати</a> | "
+                    actions += f"<a href='/books/{book['_id']}/delete?role=admin' onclick=\"return confirm('Видалити?')\">Видалити</a>"
+                else:
+                    if book.get("available", True):
+                        actions += f"<a href='/books/{book['_id']}/borrow?role=user'>Позичити</a>"
+                
+                html += f"""
+                <tr>
+                    <td>{book['_id']}</td>
+                    <td>{book['title']}</td>
+                    <td>{book.get('year', '')}</td>
+                    <td>{book.get('author_id', '')}</td>
+                    <td>{status}</td>
+                    <td>{actions}</td>
+                </tr>"""
+            html += "</table>"
+        else:
+            html += "<p>Нічого не знайдено.</p>"
+    else:
+        html += "<p>Введіть запит для пошуку.</p>"
+
+    html += f"<br><a href='/?role={role}'>← На головну</a>"
+    return HTMLResponse(content=html)
+
+# ====================== LIST BOOKS ======================
 @app.get("/books", response_class=HTMLResponse)
-async def list_books(role: str = "user", db: Session = Depends(get_db)):
-    books = db.query(Book).all()
+async def list_books(role: str = "user"):
+    all_books = list(books.find().sort("title", 1))
     
-    html = f"<h1>Список книг (Режим: {role.upper()})</h1>"
+    html = f"<h1>Список книг (Режим: {role.upper()}) - MongoDB</h1>"
     html += "<table border='1' style='border-collapse: collapse; width: 100%;'>"
-    html += "<tr><th>ID</th><th>Назва</th><th>Рік</th><th>Автор</th><th>Статус</th><th>Дії</th></tr>"
+    html += "<tr><th>ID</th><th>Назва</th><th>Рік</th><th>Автор ID</th><th>Статус</th><th>Дії</th></tr>"
     
-    for book in books:
-        author_name = f"{book.author.name} {book.author.surname}" if book.author else "Невідомий"
-        status = "Доступна" if book.available else "Видана"
-        
+    for book in all_books:
+        status = "Доступна" if book.get("available", True) else "Видана"
         actions = ""
         if role == "admin":
-            actions += f"<a href='/books/{book.id}/edit?role=admin'>Редагувати</a> | "
-            actions += f"<a href='/books/{book.id}/delete?role=admin' onclick=\"return confirm('Видалити книгу?')\">Видалити</a>"
-            if not book.available:
-                actions += f" | <a href='/books/{book.id}/return?role=admin' onclick=\"return confirm('Повернути книгу?')\">Повернути</a>"
+            actions += f"<a href='/books/{book['_id']}/edit?role=admin'>Редагувати</a> | "
+            actions += f"<a href='/books/{book['_id']}/delete?role=admin' onclick=\"return confirm('Видалити?')\">Видалити</a>"
+            if not book.get("available", True):
+                actions += f" | <a href='/books/{book['_id']}/return?role=admin' onclick=\"return confirm('Повернути?')\">Повернути</a>"
         else:
-            if book.available:
-                actions += f"<a href='/books/{book.id}/borrow?role=user'>Позичити</a>"
+            if book.get("available", True):
+                actions += f"<a href='/books/{book['_id']}/borrow?role=user'>Позичити</a>"
         
         html += f"""
         <tr>
-            <td>{book.id}</td>
-            <td>{book.title}</td>
-            <td>{book.year}</td>
-            <td>{author_name}</td>
+            <td>{book['_id']}</td>
+            <td>{book['title']}</td>
+            <td>{book.get('year', '')}</td>
+            <td>{book.get('author_id', '')}</td>
             <td>{status}</td>
             <td>{actions}</td>
         </tr>"""
@@ -93,6 +111,7 @@ async def list_books(role: str = "user", db: Session = Depends(get_db)):
     html += f"<a href='/?role={role}'>← На головну</a>"
     return HTMLResponse(content=html)
 
+# ====================== CREATE ======================
 @app.get("/books/add", response_class=HTMLResponse)
 async def add_book_form(role: str = "user"):
     if role != "admin":
@@ -102,151 +121,109 @@ async def add_book_form(role: str = "user"):
     <form action="/books" method="post">
         <p>Назва: <input type="text" name="title" required></p>
         <p>Рік видання: <input type="number" name="year" required></p>
-        <p>Автор ID (1 або 2): <input type="number" name="author_id" value="1" required></p>
+        <p>Автор ID: <input type="number" name="author_id" value="1" required></p>
         <button type="submit">Додати книгу</button>
     </form>
-    <br><a href="/books?role=admin">← Назад до списку</a>
+    <br><a href="/books?role=admin">← Назад</a>
     """
     return HTMLResponse(content=html)
 
 @app.post("/books")
-async def create_book(title: str = Form(...), year: int = Form(...), author_id: int = Form(...),
-                      role: str = "user", db: Session = Depends(get_db)):
+async def create_book(title: str = Form(...), year: int = Form(...), author_id: int = Form(...), role: str = "user"):
     if role != "admin":
         raise HTTPException(status_code=403, detail="Доступ заборонено")
-    new_book = Book(title=title, year=year, author_id=author_id)
-    db.add(new_book)
-    db.commit()
+    
+    new_book = {
+        "title": title,
+        "year": year,
+        "author_id": author_id,
+        "available": True
+    }
+    result = books.insert_one(new_book)
     return RedirectResponse(url="/books?role=admin", status_code=303)
 
+# ====================== UPDATE & DELETE ======================
 @app.get("/books/{book_id}/edit", response_class=HTMLResponse)
-async def edit_book_form(book_id: int, role: str = "user", db: Session = Depends(get_db)):
+async def edit_book_form(book_id: int, role: str = "user"):
     if role != "admin":
         return RedirectResponse(url="/books?role=user")
-    book = db.query(Book).filter(Book.id == book_id).first()
+    book = books.find_one({"_id": book_id})
     if not book:
         raise HTTPException(status_code=404, detail="Книга не знайдена")
     
     html = f"""
     <h1>Редагувати книгу</h1>
     <form action="/books/{book_id}/update" method="post">
-        <p>Назва: <input type="text" name="title" value="{book.title}" required></p>
-        <p>Рік видання: <input type="number" name="year" value="{book.year}" required></p>
-        <p>Автор ID: <input type="number" name="author_id" value="{book.author_id}" required></p>
-        <button type="submit">Зберегти зміни</button>
+        <p>Назва: <input type="text" name="title" value="{book['title']}" required></p>
+        <p>Рік: <input type="number" name="year" value="{book.get('year', '')}" required></p>
+        <p>Автор ID: <input type="number" name="author_id" value="{book.get('author_id', '')}" required></p>
+        <button type="submit">Зберегти</button>
     </form>
-    <br><a href="/books?role=admin">← Назад до списку</a>
+    <br><a href="/books?role=admin">← Назад</a>
     """
     return HTMLResponse(content=html)
 
 @app.post("/books/{book_id}/update")
-async def update_book(book_id: int, title: str = Form(...), year: int = Form(...), 
-                      author_id: int = Form(...), role: str = "user", db: Session = Depends(get_db)):
+async def update_book(book_id: int, title: str = Form(...), year: int = Form(...), author_id: int = Form(...), role: str = "user"):
     if role != "admin":
         raise HTTPException(status_code=403, detail="Доступ заборонено")
-    book = db.query(Book).filter(Book.id == book_id).first()
-    if not book:
-        raise HTTPException(status_code=404, detail="Книга не знайдена")
-    
-    book.title = title
-    book.year = year
-    book.author_id = author_id
-    db.commit()
+    books.update_one({"_id": book_id}, {"$set": {"title": title, "year": year, "author_id": author_id}})
     return RedirectResponse(url="/books?role=admin", status_code=303)
 
 @app.get("/books/{book_id}/delete")
-async def delete_book(book_id: int, role: str = "user", db: Session = Depends(get_db)):
+async def delete_book(book_id: int, role: str = "user"):
     if role != "admin":
         return RedirectResponse(url="/books?role=user")
-    book = db.query(Book).filter(Book.id == book_id).first()
-    if book:
-        db.delete(book)
-        db.commit()
+    books.delete_one({"_id": book_id})
     return RedirectResponse(url="/books?role=admin", status_code=303)
 
+# ====================== BORROW & RETURN ======================
 @app.get("/books/{book_id}/borrow")
-async def borrow_book(book_id: int, role: str = "user", db: Session = Depends(get_db)):
+async def borrow_book(book_id: int, role: str = "user"):
     if role != "user":
         return RedirectResponse(url="/books?role=user")
-    book = db.query(Book).filter(Book.id == book_id).first()
-    if not book or not book.available:
-        raise HTTPException(status_code=400, detail="Книга недоступна для видачі")
+    book = books.find_one({"_id": book_id})
+    if not book or not book.get("available", True):
+        raise HTTPException(status_code=400, detail="Книга недоступна")
     
-    loan = Loan(book_id=book.id, user_name="Тестовий Користувач", loan_date=date.today())
-    book.available = False
-    db.add(loan)
-    db.commit()
-    return RedirectResponse(url=f"/books?role=user", status_code=303)
+    books.update_one({"_id": book_id}, {"$set": {"available": False}})
+    loans.insert_one({
+        "book_id": book_id,
+        "user_name": "Тестовий Користувач",
+        "loan_date": datetime.now(),
+        "return_date": None
+    })
+    return RedirectResponse(url="/books?role=user", status_code=303)
 
 @app.get("/books/{book_id}/return")
-async def return_book(book_id: int, role: str = "user", db: Session = Depends(get_db)):
+async def return_book(book_id: int, role: str = "user"):
     if role != "admin":
         return RedirectResponse(url="/books?role=user")
-    
-    book = db.query(Book).filter(Book.id == book_id).first()
-    if book:
-        book.available = True
-        latest_loan = db.query(Loan)\
-            .filter(Loan.book_id == book_id)\
-            .order_by(Loan.loan_date.desc())\
-            .first()
-        if latest_loan and not latest_loan.return_date:
-            latest_loan.return_date = date.today()
-        db.commit()
-    
-    return RedirectResponse(url=f"/books?role=admin", status_code=303)
+    books.update_one({"_id": book_id}, {"$set": {"available": True}})
+    loans.update_one({"book_id": book_id, "return_date": None}, {"$set": {"return_date": datetime.now()}})
+    return RedirectResponse(url="/books?role=admin", status_code=303)
 
-import psycopg2
-from fastapi.responses import HTMLResponse
-
+# ====================== NEW FUNCTIONALITY (pymongo) ======================
 @app.get("/stats", response_class=HTMLResponse)
-async def psycopg_stats():
-    try:
-        # Raw psycopg2 connection (exactly as shown in the lab manual)
-        conn = psycopg2.connect(
-            dbname="library_db",
-            user="postgres",
-            password="SdKfz251AusfD",
-            host="localhost",
-            port="5432"
-        )
-        cursor = conn.cursor()
-
-        # New functionality: Statistics using raw SQL
-        cursor.execute("""
-            SELECT a.name || ' ' || a.surname as author, 
-                   COUNT(b.id) as book_count,
-                   COUNT(CASE WHEN b.available = TRUE THEN 1 END) as available_count
-            FROM authors a
-            LEFT JOIN books b ON a.id = b.author_id
-            GROUP BY a.id, a.name, a.surname
-            ORDER BY book_count DESC;
-        """)
-        author_stats = cursor.fetchall()
-
-        cursor.execute("SELECT COUNT(*) FROM books WHERE available = TRUE;")
-        available_books = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM loans WHERE return_date IS NULL;")
-        active_loans = cursor.fetchone()[0]
-
-        cursor.close()
-        conn.close()
-
-        # Generate HTML
-        html = """
-        <h1>Статистика бібліотеки (raw psycopg2)</h1>
-        <p><b>Доступних книг:</b> """ + str(available_books) + """</p>
-        <p><b>Активних видач:</b> """ + str(active_loans) + """</p>
-        <h2>Кількість книг по авторах</h2>
-        <table border="1" style="border-collapse: collapse; width: 100%;">
-            <tr><th>Автор</th><th>Всього книг</th><th>Доступно</th></tr>
-        """
-        for row in author_stats:
-            html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
-        html += "</table><br><a href='/books?role=admin'>← Назад до книг</a>"
-        
-        return HTMLResponse(content=html)
-
-    except Exception as e:
-        return HTMLResponse(content=f"<h2>Помилка підключення: {str(e)}</h2>")
+async def mongo_stats():
+    # Example of aggregation using pymongo
+    pipeline = [
+        {"$group": {
+            "_id": "$author_id",
+            "book_count": {"$sum": 1},
+            "available_count": {"$sum": {"$cond": ["$available", 1, 0]}}
+        }},
+        {"$sort": {"book_count": -1}}
+    ]
+    stats = list(books.aggregate(pipeline))
+    
+    html = "<h1>Статистика бібліотеки</h1>"
+    html += f"<p><b>Всього книг:</b> {books.count_documents({})}</p>"
+    html += f"<p><b>Доступних книг:</b> {books.count_documents({'available': True})}</p>"
+    html += "<h2>Кількість книг по авторах</h2>"
+    html += "<table border='1' style='border-collapse: collapse; width: 100%;'>"
+    html += "<tr><th>Автор ID</th><th>Всього книг</th><th>Доступно</th></tr>"
+    for s in stats:
+        html += f"<tr><td>{s['_id']}</td><td>{s['book_count']}</td><td>{s['available_count']}</td></tr>"
+    html += "</table><br><a href='/'>← На головну</a>"
+    return HTMLResponse(content=html)
