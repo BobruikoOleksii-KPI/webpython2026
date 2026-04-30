@@ -206,7 +206,7 @@ async def psycopg_stats():
         conn = psycopg2.connect(
             dbname="library_db",
             user="postgres",
-            password="",
+            password="SdKfz251AusfD",
             host="localhost",
             port="5432"
         )
