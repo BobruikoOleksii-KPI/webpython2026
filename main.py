@@ -1,11 +1,10 @@
 from fastapi import FastAPI, Depends, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
-from datetime import datetime, date
+from datetime import datetime
 from database_mongo import authors, books, loans
 
 app = FastAPI(
     title="Library Management System - MongoDB",
-    description="Лабораторна робота №3. FastAPI + MongoDB + pymongo",
     version="1.0"
 )
 
@@ -25,29 +24,55 @@ async def read_root(role: str = "user"):
     """
     return HTMLResponse(content=html)
 
-# ====================== SEARCH (NEW FEATURE) ======================
+# ====================== SEARCH (FINAL FIXED VERSION) ======================
 @app.get("/search", response_class=HTMLResponse)
 async def search_books(q: str = Query("", alias="q"), role: str = "user"):
     html = f"<h1>Пошук книг (Режим: {role.upper()})</h1>"
-    html += """
+    html += f"""
     <form method="get">
-        <p><input type="text" name="q" placeholder="Введіть назву книги або автора..." style="width:400px" value="{q}"></p>
+        <p><input type="text" name="q" placeholder="Назва книги або автор..." style="width:400px" value="{q}"></p>
         <button type="submit">Шукати</button>
     </form><br>
-    """.format(q=q)
+    """
 
-    if q:
-        # MongoDB regex search (case-insensitive) on title
-        query = {"title": {"$regex": q, "$options": "i"}}
-        found_books = list(books.find(query).sort("title", 1))
+    if q.strip():
+        query = q.strip()
+
+        # 1. Find authors whose name OR surname contains any word from the query
+        words = query.split()
+        author_query = {"$or": []}
+        for word in words:
+            author_query["$or"].extend([
+                {"name": {"$regex": word, "$options": "i"}},
+                {"surname": {"$regex": word, "$options": "i"}}
+            ])
+
+        matching_authors = list(authors.find(author_query))
+        author_ids = [a["_id"] for a in matching_authors]
+
+        # 2. Final query for books
+        final_query = {
+            "$or": [
+                {"title": {"$regex": query, "$options": "i"}}   # search by book title
+            ]
+        }
+        if author_ids:
+            final_query["$or"].append({"author_id": {"$in": author_ids}})
+
+        found_books = list(books.find(final_query).sort("title", 1))
 
         html += f"<p>Знайдено результатів: <b>{len(found_books)}</b></p>"
+
         if found_books:
+            all_authors = {a["_id"]: f"{a['name']} {a['surname']}" for a in authors.find()}
+
             html += "<table border='1' style='border-collapse: collapse; width: 100%;'>"
-            html += "<tr><th>ID</th><th>Назва</th><th>Рік</th><th>Автор ID</th><th>Статус</th><th>Дії</th></tr>"
+            html += "<tr><th>ID</th><th>Назва</th><th>Рік</th><th>Автор</th><th>Статус</th><th>Дії</th></tr>"
             
             for book in found_books:
+                author_name = all_authors.get(book.get("author_id"), "Невідомий автор")
                 status = "Доступна" if book.get("available", True) else "Видана"
+                
                 actions = ""
                 if role == "admin":
                     actions += f"<a href='/books/{book['_id']}/edit?role=admin'>Редагувати</a> | "
@@ -61,30 +86,35 @@ async def search_books(q: str = Query("", alias="q"), role: str = "user"):
                     <td>{book['_id']}</td>
                     <td>{book['title']}</td>
                     <td>{book.get('year', '')}</td>
-                    <td>{book.get('author_id', '')}</td>
+                    <td>{author_name}</td>
                     <td>{status}</td>
                     <td>{actions}</td>
                 </tr>"""
             html += "</table>"
         else:
-            html += "<p>Нічого не знайдено.</p>"
+            html += "<p>Нічого не знайдено за вашим запитом.</p>"
     else:
-        html += "<p>Введіть запит для пошуку.</p>"
+        html += "<p>Введіть назву книги або ім’я/прізвище автора.</p>"
 
     html += f"<br><a href='/?role={role}'>← На головну</a>"
     return HTMLResponse(content=html)
 
-# ====================== LIST BOOKS ======================
+# ====================== LIST BOOKS (with real author names) ======================
 @app.get("/books", response_class=HTMLResponse)
 async def list_books(role: str = "user"):
     all_books = list(books.find().sort("title", 1))
     
+    # Pre-load all authors for fast lookup
+    all_authors = {a["_id"]: f"{a['name']} {a['surname']}" for a in authors.find()}
+    
     html = f"<h1>Список книг (Режим: {role.upper()}) - MongoDB</h1>"
     html += "<table border='1' style='border-collapse: collapse; width: 100%;'>"
-    html += "<tr><th>ID</th><th>Назва</th><th>Рік</th><th>Автор ID</th><th>Статус</th><th>Дії</th></tr>"
+    html += "<tr><th>ID</th><th>Назва</th><th>Рік</th><th>Автор</th><th>Статус</th><th>Дії</th></tr>"
     
     for book in all_books:
+        author_name = all_authors.get(book.get("author_id"), "Невідомий автор")
         status = "Доступна" if book.get("available", True) else "Видана"
+        
         actions = ""
         if role == "admin":
             actions += f"<a href='/books/{book['_id']}/edit?role=admin'>Редагувати</a> | "
@@ -100,7 +130,7 @@ async def list_books(role: str = "user"):
             <td>{book['_id']}</td>
             <td>{book['title']}</td>
             <td>{book.get('year', '')}</td>
-            <td>{book.get('author_id', '')}</td>
+            <td>{author_name}</td>
             <td>{status}</td>
             <td>{actions}</td>
         </tr>"""
@@ -111,17 +141,29 @@ async def list_books(role: str = "user"):
     html += f"<a href='/?role={role}'>← На головну</a>"
     return HTMLResponse(content=html)
 
-# ====================== CREATE ======================
+# ====================== CREATE (with author dropdown) ======================
 @app.get("/books/add", response_class=HTMLResponse)
 async def add_book_form(role: str = "user"):
     if role != "admin":
         return RedirectResponse(url="/books?role=user")
-    html = """
+    
+    # Get all authors for dropdown
+    all_authors = list(authors.find().sort("surname", 1))
+    
+    options = ""
+    for a in all_authors:
+        options += f'<option value="{a["_id"]}">{a["_id"]} - {a["name"]} {a["surname"]}</option>'
+    
+    html = f"""
     <h1>Додати нову книгу</h1>
     <form action="/books" method="post">
         <p>Назва: <input type="text" name="title" required></p>
         <p>Рік видання: <input type="number" name="year" required></p>
-        <p>Автор ID: <input type="number" name="author_id" value="1" required></p>
+        <p>Автор: 
+            <select name="author_id" required>
+                {options}
+            </select>
+        </p>
         <button type="submit">Додати книгу</button>
     </form>
     <br><a href="/books?role=admin">← Назад</a>
@@ -139,35 +181,53 @@ async def create_book(title: str = Form(...), year: int = Form(...), author_id: 
         "author_id": author_id,
         "available": True
     }
-    result = books.insert_one(new_book)
+    books.insert_one(new_book)
     return RedirectResponse(url="/books?role=admin", status_code=303)
 
-# ====================== UPDATE & DELETE ======================
+# ====================== UPDATE (EDIT FORM) ======================
 @app.get("/books/{book_id}/edit", response_class=HTMLResponse)
 async def edit_book_form(book_id: int, role: str = "user"):
     if role != "admin":
         return RedirectResponse(url="/books?role=user")
+    
     book = books.find_one({"_id": book_id})
     if not book:
         raise HTTPException(status_code=404, detail="Книга не знайдена")
+    
+    # Get all authors for dropdown
+    all_authors = list(authors.find().sort("surname", 1))
+    
+    options = ""
+    for a in all_authors:
+        selected = "selected" if a["_id"] == book.get("author_id") else ""
+        options += f'<option value="{a["_id"]}" {selected}>{a["_id"]} - {a["name"]} {a["surname"]}</option>'
     
     html = f"""
     <h1>Редагувати книгу</h1>
     <form action="/books/{book_id}/update" method="post">
         <p>Назва: <input type="text" name="title" value="{book['title']}" required></p>
-        <p>Рік: <input type="number" name="year" value="{book.get('year', '')}" required></p>
-        <p>Автор ID: <input type="number" name="author_id" value="{book.get('author_id', '')}" required></p>
-        <button type="submit">Зберегти</button>
+        <p>Рік видання: <input type="number" name="year" value="{book.get('year', '')}" required></p>
+        <p>Автор: 
+            <select name="author_id" required>
+                {options}
+            </select>
+        </p>
+        <button type="submit">Зберегти зміни</button>
     </form>
-    <br><a href="/books?role=admin">← Назад</a>
+    <br><a href="/books?role=admin">← Назад до списку</a>
     """
     return HTMLResponse(content=html)
 
 @app.post("/books/{book_id}/update")
-async def update_book(book_id: int, title: str = Form(...), year: int = Form(...), author_id: int = Form(...), role: str = "user"):
+async def update_book(book_id: int, title: str = Form(...), year: int = Form(...), 
+                      author_id: int = Form(...), role: str = "user"):
     if role != "admin":
         raise HTTPException(status_code=403, detail="Доступ заборонено")
-    books.update_one({"_id": book_id}, {"$set": {"title": title, "year": year, "author_id": author_id}})
+    
+    books.update_one(
+        {"_id": book_id}, 
+        {"$set": {"title": title, "year": year, "author_id": author_id}}
+    )
     return RedirectResponse(url="/books?role=admin", status_code=303)
 
 @app.get("/books/{book_id}/delete")

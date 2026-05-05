@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 import models
-from database_postgres import SessionLocal, engine, Base
+from database import SessionLocal, engine
 from models import Base, Book, Author, Loan
 from datetime import date
 
@@ -195,58 +195,3 @@ async def return_book(book_id: int, role: str = "user", db: Session = Depends(ge
         db.commit()
     
     return RedirectResponse(url=f"/books?role=admin", status_code=303)
-
-import psycopg2
-from fastapi.responses import HTMLResponse
-
-@app.get("/stats", response_class=HTMLResponse)
-async def psycopg_stats():
-    try:
-        # Raw psycopg2 connection (exactly as shown in the lab manual)
-        conn = psycopg2.connect(
-            dbname="library_db",
-            user="postgres",
-            password="SdKfz251AusfD",
-            host="localhost",
-            port="5432"
-        )
-        cursor = conn.cursor()
-
-        # New functionality: Statistics using raw SQL
-        cursor.execute("""
-            SELECT a.name || ' ' || a.surname as author, 
-                   COUNT(b.id) as book_count,
-                   COUNT(CASE WHEN b.available = TRUE THEN 1 END) as available_count
-            FROM authors a
-            LEFT JOIN books b ON a.id = b.author_id
-            GROUP BY a.id, a.name, a.surname
-            ORDER BY book_count DESC;
-        """)
-        author_stats = cursor.fetchall()
-
-        cursor.execute("SELECT COUNT(*) FROM books WHERE available = TRUE;")
-        available_books = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM loans WHERE return_date IS NULL;")
-        active_loans = cursor.fetchone()[0]
-
-        cursor.close()
-        conn.close()
-
-        # Generate HTML
-        html = """
-        <h1>Статистика бібліотеки (raw psycopg2)</h1>
-        <p><b>Доступних книг:</b> """ + str(available_books) + """</p>
-        <p><b>Активних видач:</b> """ + str(active_loans) + """</p>
-        <h2>Кількість книг по авторах</h2>
-        <table border="1" style="border-collapse: collapse; width: 100%;">
-            <tr><th>Автор</th><th>Всього книг</th><th>Доступно</th></tr>
-        """
-        for row in author_stats:
-            html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
-        html += "</table><br><a href='/books?role=admin'>← Назад до книг</a>"
-        
-        return HTMLResponse(content=html)
-
-    except Exception as e:
-        return HTMLResponse(content=f"<h2>Помилка підключення: {str(e)}</h2>")
